@@ -8,8 +8,10 @@ on:
 
 ## Define which docker arch to build for
 env:
+  registry: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
   docker_platforms: linux/amd64
-  docker-org: blockstack
+  # docker-org: blockstack
 
 concurrency:
   group: docker-image-source-${{ github.head_ref || github.ref || github.run_id }}
@@ -30,36 +32,53 @@ jobs:
           - debian
     steps:
       ## Setup Docker for the builds
-      - name: Docker setup
-        uses: stacks-network/actions/docker@main
+      # - name: Docker setup
+      #   uses: stacks-network/actions/docker@main
+      #   with:
+      #     username: ${{ secrets.DOCKERHUB_USERNAME }}
+      #     password: ${{ secrets.DOCKERHUB_PASSWORD }}
+
+      - name: Log in to the Container registry
+        uses: docker/login-action@65b78e6e13532edd9afa3aa52ac7964289d1a9c1
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_PASSWORD }}
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       ## Set docker metatdata
-      - name: Docker Metadata ( ${{matrix.dist}} )
-        id: docker_metadata
-        uses: docker/metadata-action@96383f45573cb7f253c731d3b3ab81c87ef81934 #v5.0.0
+      # - name: Docker Metadata ( ${{matrix.dist}} )
+      #   id: docker_metadata
+      #   uses: docker/metadata-action@96383f45573cb7f253c731d3b3ab81c87ef81934 #v5.0.0
+      #   with:
+      #     images: |
+      #       ${{env.docker-org}}/${{ github.event.repository.name }}
+      #       ${{env.docker-org}}/stacks-blockchain
+      #     tags: |
+      #       type=raw,value=${{ env.BRANCH_NAME }}
+      #       type=ref,event=pr
+
+      - name: Extract metadata (tags, labels) for Docker
+        id: meta
+        uses: docker/metadata-action@9ec57ed1fcdbf14dcef7dfbe97b2010124a938b7
         with:
-          images: |
-            ${{env.docker-org}}/${{ github.event.repository.name }}
-            ${{env.docker-org}}/stacks-blockchain
-          tags: |
-            type=raw,value=${{ env.BRANCH_NAME }}
-            type=ref,event=pr
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
 
       ## Build docker image
       - name: Build and Push ( ${{matrix.dist}} )
         id: docker_build
         uses: docker/build-push-action@0565240e2d4ab88bba5387d719585280857ece09 # v5.0.0
         with:
+          context: .
           file: ./.github/actions/dockerfiles/Dockerfile.${{matrix.dist}}-source
           platforms: ${{ env.docker_platforms }}
-          tags: ${{ steps.docker_metadata.outputs.tags }}
-          labels: ${{ steps.docker_metadata.outputs.labels }}
+          # tags: ${{ steps.docker_metadata.outputs.tags }}
+          # labels: ${{ steps.docker_metadata.outputs.labels }}
           build-args: |
             REPO=${{ github.repository_owner }}/${{ github.event.repository.name }}
-            STACKS_NODE_VERSION=${{ env.GITHUB_SHA_SHORT }}
-            GIT_BRANCH=${{ env.GITHUB_REF_SHORT }}
-            GIT_COMMIT=${{ env.GITHUB_SHA_SHORT }}
-          push: ${{ env.DOCKER_PUSH }}
+          # build-args: |
+          #   REPO=${{ github.repository_owner }}/${{ github.event.repository.name }}
+          #   # STACKS_NODE_VERSION=${{ env.GITHUB_SHA_SHORT }}
+          #   # GIT_BRANCH=${{ env.GITHUB_REF_SHORT }}
+          #   # GIT_COMMIT=${{ env.GITHUB_SHA_SHORT }}
+          # push: ${{ env.DOCKER_PUSH }}
+          push: true
