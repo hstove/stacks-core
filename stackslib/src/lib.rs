@@ -86,6 +86,9 @@ pub fn version_string(pkg_name: &str, pkg_version: Option<&str>) -> String {
     let git_commit = GIT_COMMIT_ENV.unwrap_or_else(|| GIT_COMMIT.unwrap_or(""));
     let git_tree_clean = GIT_TREE_CLEAN_ENV.unwrap_or_else(|| GIT_TREE_CLEAN.unwrap_or(""));
 
+    println!("{}", pkg_name);
+    println!("{}", pkg_version);
+
     format!(
         "{} {} ({}:{}{}, {} build, {} [{}])",
         pkg_name,
