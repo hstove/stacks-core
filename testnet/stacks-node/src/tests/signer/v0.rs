@@ -54,10 +54,10 @@ use stacks::codec::StacksMessageCodec;
 use stacks::config::{Config as NeonConfig, EventKeyType, EventObserverConfig};
 use stacks::core::mempool::MemPoolWalkStrategy;
 use stacks::core::test_util::{
-    insert_tx_in_mempool, make_contract_call, make_contract_publish,
+    insert_tx_in_mempool, make_big_read_count_contract, make_contract_call, make_contract_publish,
     make_stacks_transfer_serialized, to_addr,
 };
-use stacks::core::{StacksEpochId, CHAIN_ID_TESTNET};
+use stacks::core::{StacksEpochId, CHAIN_ID_TESTNET, HELIUM_BLOCK_LIMIT_20};
 use stacks::libstackerdb::StackerDBChunkData;
 use stacks::net::api::getsigner::GetSignerResponse;
 use stacks::net::api::postblock_proposal::{
@@ -3571,6 +3571,155 @@ fn tx_replay_reject_invalid_proposals_during_replay() {
     info!("---- Ensure signers cleared the tx replay set ----");
     signer_test
         .wait_for_signer_state_check(30, |state| Ok(state.get_tx_replay_set().is_none()))
+        .expect("Timed out waiting for tx replay set to be cleared");
+
+    signer_test.shutdown();
+}
+
+#[test]
+#[ignore]
+/// Trigger a Bitcoin fork that creates a replay set that
+/// contains more transactions than can fit into a tenure's budget.
+fn tx_replay_budget_exceeded() {
+    if env::var("BITCOIND_TEST") != Ok("1".into()) {
+        return;
+    }
+
+    let num_signers = 5;
+    let sender_sk = Secp256k1PrivateKey::random();
+    let sender_addr = tests::to_addr(&sender_sk);
+    let send_amt = 1000;
+    let send_fee = 1000000;
+    let signer_test: SignerTest<SpawnedSigner> = SignerTest::new_with_config_modifications(
+        num_signers,
+        vec![(sender_addr, (send_amt + send_fee) * 1000)],
+        |c| {
+            c.validate_with_replay_tx = true;
+            c.tenure_idle_timeout = Duration::from_secs(10);
+        },
+        |node_config| {
+            node_config.miner.block_commit_delay = Duration::from_secs(1);
+            node_config.miner.replay_transactions = true;
+        },
+        None,
+        None,
+    );
+    let conf = &signer_test.running_nodes.conf;
+    let _http_origin = format!("http://{}", &conf.node.rpc_bind);
+    let _stacks_miner_pk = StacksPublicKey::from_private(&conf.miner.mining_key.unwrap());
+
+    let btc_controller = &signer_test.running_nodes.btc_regtest_controller;
+
+    signer_test.boot_to_epoch_3();
+    info!("------------------------- Reached Epoch 3.0 -------------------------");
+    let pre_fork_tenures = 10;
+
+    for i in 0..pre_fork_tenures {
+        info!("Mining pre-fork tenure {} of {pre_fork_tenures}", i + 1);
+        signer_test.mine_nakamoto_block(Duration::from_secs(30), true);
+    }
+
+    signer_test.check_signer_states_normal();
+
+    info!("---- Deploying big contract ----");
+
+    // First, just deploy the contract in its own tenure
+    let contract_code = make_big_read_count_contract(HELIUM_BLOCK_LIMIT_20, 50);
+
+    let (_deploy_txid, deploy_nonce) = signer_test
+        .submit_contract_deploy(&sender_sk, contract_code.as_str(), "big-contract")
+        .unwrap();
+
+    signer_test
+        .wait_for_nonce_increase(&sender_addr, deploy_nonce)
+        .expect("Timed out waiting for nonce to increase");
+
+    signer_test.mine_nakamoto_block(Duration::from_secs(30), true);
+    signer_test.mine_nakamoto_block(Duration::from_secs(30), true);
+
+    let tip: stacks::net::api::getinfo::RPCPeerInfoData = get_chain_info(conf);
+
+    let (txid1, txid1_nonce) = signer_test
+        .submit_contract_call(&sender_sk, "big-contract", "big-tx", &vec![])
+        .unwrap();
+
+    info!("---- Waiting for first big tx to be mined ----");
+
+    signer_test
+        .wait_for_nonce_increase(&sender_addr, txid1_nonce)
+        .expect("Timed out waiting for nonce to increase");
+
+    let (txid2, txid2_nonce) = signer_test
+        .submit_contract_call(&sender_sk, "big-contract", "big-tx", &vec![])
+        .unwrap();
+
+    info!("---- Waiting for second big tx to be mined ----");
+
+    signer_test
+        .wait_for_nonce_increase(&sender_addr, txid2_nonce)
+        .expect("Timed out waiting for nonce to increase");
+
+    wait_for(30, || {
+        let new_tip = get_chain_info(&conf);
+        Ok(new_tip.stacks_tip_height > tip.stacks_tip_height)
+    })
+    .expect("Timed out waiting for transfer tx to be mined");
+
+    info!("------------------------- Triggering Bitcoin Fork -------------------------");
+
+    let burn_header_hash_to_fork = btc_controller.get_block_hash(tip.burn_block_height - 1);
+    btc_controller.invalidate_block(&burn_header_hash_to_fork);
+    btc_controller.build_next_block(3);
+
+    // note, we should still have normal signer states!
+    signer_test.check_signer_states_normal();
+
+    info!("Wait for block off of shallow fork");
+
+    TEST_MINE_STALL.set(true);
+
+    let submitted_commits = signer_test
+        .running_nodes
+        .counters
+        .naka_submitted_commits
+        .clone();
+
+    // we need to mine some blocks to get back to being considered a frequent miner
+    for i in 0..3 {
+        let current_burn_height = get_chain_info(&conf).burn_block_height;
+        info!(
+            "Mining block #{i} to be considered a frequent miner";
+            "current_burn_height" => current_burn_height,
+        );
+        let commits_count = submitted_commits.load(Ordering::SeqCst);
+        next_block_and(btc_controller, 60, || {
+            Ok(submitted_commits.load(Ordering::SeqCst) > commits_count)
+        })
+        .unwrap();
+    }
+
+    signer_test
+        .wait_for_signer_state_check(30, |state| {
+            let Some(tx_replay_set) = state.get_tx_replay_set() else {
+                return Ok(false);
+            };
+            let len_ok = tx_replay_set.len() == 2;
+            let txid1_ok = tx_replay_set[0].txid().to_hex() == txid1;
+            let txid2_ok = tx_replay_set[1].txid().to_hex() == txid2;
+            Ok(len_ok && txid1_ok && txid2_ok)
+        })
+        .expect("Timed out waiting for tx replay set");
+
+    TEST_MINE_STALL.set(false);
+
+    info!("---- Waiting for replay set to be cleared ----");
+
+    // Now, wait for the tx replay set to be cleared
+    signer_test
+        .wait_for_signer_state_check(30, |state| {
+            let tx_replay_set = state.get_tx_replay_set();
+            Ok(tx_replay_set.is_none())
+        })
         .expect("Timed out waiting for tx replay set to be cleared");
 
     signer_test.shutdown();
