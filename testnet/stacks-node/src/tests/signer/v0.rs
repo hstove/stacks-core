@@ -4959,7 +4959,7 @@ fn tx_replay_budget_exceeded_tenure_extend() {
             vec![(sender_addr, (send_amt + send_fee) * 1000)],
             |c| {
                 c.validate_with_replay_tx = true;
-                c.tenure_idle_timeout = Duration::from_secs(10);
+                c.tenure_idle_timeout = Duration::from_secs(120);
             },
             |node_config| {
                 node_config.miner.block_commit_delay = Duration::from_secs(1);
@@ -5024,7 +5024,10 @@ fn tx_replay_budget_exceeded_tenure_extend() {
         .submit_contract_call(&sender_sk, "big-contract", "big-tx", &vec![])
         .unwrap();
 
+    // new tenure, so the tx can fit
     info!("---- Waiting for second big tx to be mined ----");
+
+    signer_test.mine_nakamoto_block(Duration::from_secs(30), true);
 
     signer_test
         .wait_for_nonce_increase(&sender_addr, txid2_nonce)
