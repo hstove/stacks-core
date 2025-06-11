@@ -27,7 +27,8 @@ use libsigner::v0::messages::{
     RejectReason, SignerMessage, StateMachineUpdateContent, StateMachineUpdateMinerState,
 };
 use libsigner::{
-    BlockProposal, BlockProposalData, SignerSession, StackerDBSession, VERSION_STRING,
+    BlockProposal, BlockProposalData, SignerSession, StackerDBSession, StacksBlockEvent,
+    VERSION_STRING,
 };
 use madhouse::{execute_commands, prop_allof, scenario, Command};
 use pinny::tag;
@@ -4949,6 +4950,16 @@ fn snapshot_test() {
 #[ignore]
 /// Trigger a Bitcoin fork that creates a replay set that
 /// contains more transactions than can fit into a tenure's budget.
+///
+/// The test scenario:
+///
+/// - Deploy a contract (`big-contract`) that, when called, has >= 50% of a tenure's budget
+/// - Mine a few BTC blocks
+/// - Mine two blocks that contain `big-contract` calls
+/// - Trigger a fork that includes the two big transactions
+/// - Ensure that the miner produces TenureExtend transactions
+///   that allow the replay set to be cleared more quickly than
+///   via time-based tenure extends.
 fn tx_replay_budget_exceeded_tenure_extend() {
     if env::var("BITCOIND_TEST") != Ok("1".into()) {
         return;
@@ -5079,31 +5090,19 @@ fn tx_replay_budget_exceeded_tenure_extend() {
         .unwrap();
     }
 
-    let mut last_log = Instant::now();
-    last_log -= Duration::from_secs(5);
     signer_test
         .wait_for_signer_state_check(30, |state| {
             let Some(tx_replay_set) = state.get_tx_replay_set() else {
-                if last_log.elapsed() > Duration::from_secs(5) {
-                    info!("---- tx_replay_set: none -----");
-                    last_log = Instant::now();
-                }
                 return Ok(false);
             };
             let len_ok = tx_replay_set.len() == 2;
             let txid1_ok = tx_replay_set[0].txid().to_hex() == txid1;
             let txid2_ok = tx_replay_set[1].txid().to_hex() == txid2;
-            if last_log.elapsed() > Duration::from_secs(5) {
-                info!("---- tx_replay_set: -----";
-                    "len" => tx_replay_set.len(),
-                    "txid1" => tx_replay_set[0].txid().to_hex(),
-                    "txid2" => tx_replay_set[1].txid().to_hex(),
-                );
-                last_log = Instant::now();
-            }
             Ok(len_ok && txid1_ok && txid2_ok)
         })
         .expect("Timed out waiting for tx replay set");
+
+    let blocks_before = test_observer::get_blocks().len();
 
     TEST_MINE_STALL.set(false);
 
@@ -5116,6 +5115,60 @@ fn tx_replay_budget_exceeded_tenure_extend() {
             Ok(tx_replay_set.is_none())
         })
         .expect("Timed out waiting for tx replay set to be cleared");
+
+    // Validate that the blocks produced are correct
+
+    let blocks = test_observer::get_blocks()
+        .clone()
+        .into_iter()
+        .skip(blocks_before)
+        .map(|b| serde_json::from_value::<StacksBlockEvent>(b).unwrap())
+        .collect::<Vec<_>>();
+
+    // first is just a tenureChange + coinbase
+    let block = &blocks[0];
+    info!("---- block ----";
+        "transactions" => ?block.transactions,
+    );
+    assert!(matches!(
+        block.transactions[0].payload,
+        TransactionPayload::TenureChange(TenureChangePayload {
+            cause: TenureChangeCause::BlockFound,
+            ..
+        })
+    ));
+    assert!(matches!(
+        block.transactions[1].payload,
+        TransactionPayload::Coinbase(..)
+    ));
+
+    // second should be extend + tx1
+    let block = &blocks[1];
+    info!("---- block ----";
+        "transactions" => ?block.transactions,
+    );
+    assert!(matches!(
+        block.transactions[0].payload,
+        TransactionPayload::TenureChange(TenureChangePayload {
+            cause: TenureChangeCause::Extended,
+            ..
+        })
+    ));
+    assert_eq!(block.transactions[1].txid().to_hex(), txid1);
+
+    // third should be extend + tx2
+    let block = &blocks[2];
+    info!("---- block ----";
+        "transactions" => ?block.transactions,
+    );
+    assert!(matches!(
+        block.transactions[0].payload,
+        TransactionPayload::TenureChange(TenureChangePayload {
+            cause: TenureChangeCause::Extended,
+            ..
+        })
+    ));
+    assert_eq!(block.transactions[1].txid().to_hex(), txid2);
 
     signer_test.shutdown();
 }
