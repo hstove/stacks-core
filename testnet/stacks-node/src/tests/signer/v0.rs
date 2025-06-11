@@ -3506,35 +3506,42 @@ fn tx_replay_reject_invalid_proposals_during_replay() {
     }
 
     let num_signers = 5;
-    let sender_sk = Secp256k1PrivateKey::random();
+    let sender_sk = Secp256k1PrivateKey::from_seed("sender_1".as_bytes());
     let sender_addr = tests::to_addr(&sender_sk);
-    let sender_sk2 = Secp256k1PrivateKey::random();
+    let sender_sk2 = Secp256k1PrivateKey::from_seed("sender_2".as_bytes());
     let sender_addr2 = tests::to_addr(&sender_sk2);
     let send_amt = 100;
     let send_fee = 180;
-    let signer_test: SignerTest<SpawnedSigner> = SignerTest::new_with_config_modifications(
-        num_signers,
-        vec![
-            (sender_addr, send_amt + send_fee),
-            (sender_addr2, send_amt + send_fee),
-        ],
-        |c| {
-            c.validate_with_replay_tx = true;
-        },
-        |node_config| {
-            node_config.miner.block_commit_delay = Duration::from_secs(1);
-            node_config.miner.replay_transactions = true;
-        },
-        None,
-        None,
-    );
+    let signer_test: SignerTest<SpawnedSigner> =
+        SignerTest::new_with_config_modifications_and_snapshot(
+            num_signers,
+            vec![
+                (sender_addr, send_amt + send_fee),
+                (sender_addr2, send_amt + send_fee),
+            ],
+            |c| {
+                c.validate_with_replay_tx = true;
+            },
+            |node_config| {
+                node_config.miner.block_commit_delay = Duration::from_secs(1);
+                node_config.miner.replay_transactions = true;
+                node_config.miner.activated_vrf_key_path =
+                    Some(format!("{}/vrf_key", node_config.node.working_dir));
+            },
+            None,
+            None,
+            Some(function_name!()),
+        );
     let conf = &signer_test.running_nodes.conf;
     let http_origin = format!("http://{}", &conf.node.rpc_bind);
     let btc_controller = &signer_test.running_nodes.btc_regtest_controller;
 
     let stacks_miner_pk = StacksPublicKey::from_private(&conf.miner.mining_key.unwrap());
 
-    signer_test.boot_to_epoch_3();
+    if signer_test.bootstrap_snapshot() {
+        signer_test.shutdown_and_snapshot();
+        return;
+    }
     info!("------------------------- Reached Epoch 3.0 -------------------------");
     let pre_fork_tenures = 10;
 

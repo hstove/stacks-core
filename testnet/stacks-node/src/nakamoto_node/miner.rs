@@ -1601,7 +1601,6 @@ impl BlockMinerThread {
             }
         };
         // Check if we can and should include a time-based tenure extend.
-        info!("Tenure extend: Checking if we can and should include a time-based tenure extend");
         if self.last_block_mined.is_some() {
             if self.config.miner.replay_transactions
                 && coordinator
@@ -1619,7 +1618,6 @@ impl BlockMinerThread {
                     .tenure_budget
                     .proportion_largest_dimension(&self.tenure_cost);
                 if usage < self.config.miner.tenure_extend_cost_threshold {
-                    info!("Tenure extend: Not extending tenure because we have spent less than 50% of the budget");
                     return Ok(NakamotoTenureInfo {
                         coinbase_tx: None,
                         tenure_change_tx: None,
@@ -1627,19 +1625,9 @@ impl BlockMinerThread {
                 }
 
                 let tenure_extend_timestamp = coordinator.get_tenure_extend_timestamp();
-                info!(
-                    "Tenure extend: Tenure extend timestamp: {}",
-                    tenure_extend_timestamp
-                );
                 if get_epoch_time_secs() <= tenure_extend_timestamp
                     && self.tenure_change_time.elapsed() <= self.config.miner.tenure_timeout
                 {
-                    info!("Tenure extend: Not extending tenure because the timestamp is in the future";
-                        "current_timestamp" => get_epoch_time_secs(),
-                        "tenure_extend_timestamp" => tenure_extend_timestamp,
-                        "tenure_change_time_elapsed" => self.tenure_change_time.elapsed().as_secs(),
-                        "tenure_timeout_secs" => self.config.miner.tenure_timeout.as_secs(),
-                    );
                     return Ok(NakamotoTenureInfo {
                         coinbase_tx: None,
                         tenure_change_tx: None,
