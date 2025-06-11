@@ -276,7 +276,7 @@ impl SignerTrait<SignerMessage> for Signer {
                 .unwrap_or_else(|e| error!("{self}: failed to update local state machine for pending update"; "err" => ?e));
         }
 
-        if prior_state.should_broadcast_update(&self.local_state_machine) {
+        if prior_state != self.local_state_machine {
             let version = self.get_signer_protocol_version();
             self.local_state_machine
                 .send_signer_update_message(&mut self.stackerdb, version);
@@ -323,7 +323,7 @@ impl SignerTrait<SignerMessage> for Signer {
         self.check_submitted_block_proposal();
         self.check_pending_block_validations(stacks_client);
 
-        if prior_state.should_broadcast_update(&self.local_state_machine) {
+        if prior_state != self.local_state_machine {
             let version = self.get_signer_protocol_version();
             self.local_state_machine
                 .send_signer_update_message(&mut self.stackerdb, version);
