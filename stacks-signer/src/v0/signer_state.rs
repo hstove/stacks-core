@@ -941,4 +941,19 @@ impl LocalStateMachine {
             .collect::<Vec<_>>();
         Ok(Some(forked_txs))
     }
+
+    /// Determines if the local state machine should broadcast an update by comparing
+    /// to a prior state.
+    ///
+    /// This is needed because `PartialEq` on [`SignerStateMachine`] excludes
+    /// the `tx_replay_set` field.
+    pub fn should_broadcast_update(&self, prior_state: &LocalStateMachine) -> bool {
+        // Base `PartialEq` check
+        if self != prior_state {
+            return true;
+        }
+
+        // Check if the tx replay set is different
+        self.get_tx_replay_set() != prior_state.get_tx_replay_set()
+    }
 }
