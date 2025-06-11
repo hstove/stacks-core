@@ -821,15 +821,24 @@ impl MultipleMinerTest {
         let burn_block_before = SortitionDB::get_canonical_burn_chain_tip(sortdb.conn())
             .unwrap()
             .block_height;
-
         self.btc_regtest_controller_mut()
             .build_next_block(nmb_blocks);
         wait_for(timeout_secs, || {
             let burn_block = SortitionDB::get_canonical_burn_chain_tip(sortdb.conn())
                 .unwrap()
                 .block_height;
-            Ok(burn_block >= burn_block_before + nmb_blocks)
-        })
+            Ok(burn_block >= burn_block_before + nmb_blocks
+                && self.get_peer_info().burn_block_height >= burn_block_before + nmb_blocks)
+        })?;
+        let peer_after = self.get_peer_info();
+        wait_for_state_machine_update(
+            timeout_secs,
+            &peer_after.pox_consensus,
+            peer_after.burn_block_height,
+            None,
+            &self.signer_test.signer_test_pks(),
+            SUPPORTED_SIGNER_PROTOCOL_VERSION,
+        )
     }
 
     /// Mine `nmb_blocks` blocks on the bitcoin regtest chain and wait for the sortition
@@ -844,7 +853,6 @@ impl MultipleMinerTest {
         let burn_block_before = SortitionDB::get_canonical_burn_chain_tip(sortdb.conn())
             .unwrap()
             .block_height;
-
         self.btc_regtest_controller_mut()
             .build_next_block(nmb_blocks);
         wait_for(timeout_secs, || {
@@ -3654,28 +3662,9 @@ fn tx_replay_reject_invalid_proposals_during_replay() {
         "---- Wait for block pushed at stacks block height {} ----",
         stacks_height_before + 2
     );
-    let mut block = None;
-    wait_for(30, || {
-        let chunks = test_observer::get_stackerdb_chunks();
-        for chunk in chunks.into_iter().flat_map(|chunk| chunk.modified_slots) {
-            let Ok(message) = SignerMessage::consensus_deserialize(&mut chunk.data.as_slice())
-            else {
-                continue;
-            };
-            if let SignerMessage::BlockPushed(pushed_block) = message {
-                if pushed_block.header.signer_signature_hash()
-                    != rejected_block.header.signer_signature_hash()
-                    && pushed_block.header.chain_length == stacks_height_before + 2
-                {
-                    block = Some(pushed_block);
-                    return Ok(true);
-                }
-            }
-        }
-        Ok(false)
-    })
-    .expect("Timed out waiting for pushed block after fork");
-    let accepted_block = block.expect("No block found");
+    let accepted_block =
+        wait_for_block_pushed_by_miner_key(30, stacks_height_before + 2, &stacks_miner_pk)
+            .expect("Failed to mine block stacks_height_before + 2");
     info!(
         "---- Ensure signers accept block at height {:?} with a valid transaction replay ----",
         stacks_height_before + 2
@@ -9278,10 +9267,29 @@ fn new_tenure_while_validating_previous_scenario() {
     // STEP 2: Miner B proposes a block in tenure B, while A's block is pending validation
 
     info!("----- Mining a new BTC block -----");
-    signer_test
-        .running_nodes
-        .btc_regtest_controller
-        .build_next_block(1);
+    TEST_MINE_SKIP.set(true);
+    next_block_and(
+        &signer_test.running_nodes.btc_regtest_controller,
+        30,
+        || {
+            Ok(
+                get_chain_info(&signer_test.running_nodes.conf).burn_block_height
+                    > info_before.burn_block_height,
+            )
+        },
+    )
+    .unwrap();
+
+    let info = signer_test.get_peer_info();
+    wait_for_state_machine_update_by_miner_tenure_id(
+        30,
+        &info.pox_consensus,
+        &signer_test.signer_test_pks(),
+        SUPPORTED_SIGNER_PROTOCOL_VERSION,
+    )
+    .expect("Failed to update signer states");
+    info!("----- Attempting to Mine a Sister Block -----");
+    TEST_MINE_SKIP.set(false);
 
     let mut last_log = Instant::now();
     last_log -= Duration::from_secs(5);
@@ -9326,6 +9334,7 @@ fn new_tenure_while_validating_previous_scenario() {
 
     // STEP 3: Miner B is rejected, retries, and mines a block
 
+    info!("----- Mining BlockFound -----");
     // Now, wait for miner B to propose a new block
     let block_pushed =
         wait_for_block_pushed_by_miner_key(30, stacks_height_before_stall + 2, &miner_pk)
